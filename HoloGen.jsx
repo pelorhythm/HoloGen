@@ -16,7 +16,7 @@ var HOLO = HOLO || {};
 
 (function holoGenMain(thisObj) {
 
-    HOLO.VERSION = "0.1.0";
+    HOLO.VERSION = "0.2.1";
 
     // ---------------------------------------------------------
     // シード付き乱数 (mulberry32) — 同じシードなら同じ結果
@@ -100,7 +100,9 @@ var HOLO = HOLO || {};
             withCallouts: keep.withCallouts !== false,
             withGrid: keep.withGrid !== false,
             withDust: keep.withDust !== false,
-            quality: keep.quality || "標準"
+            quality: keep.quality || "標準",
+            motif: keep.motif || "ホロ計器",
+            center: keep.center || "ランダム"
         };
     };
 
@@ -245,6 +247,343 @@ var HOLO = HOLO || {};
 
     // 装飾グループの種類プール
     var DECO_KINDS = ["data", "bars", "tickfine", "dotsparse"];
+
+    // ---------------------------------------------------------
+    // センターオブジェクト用ヘルパー
+    // ---------------------------------------------------------
+    function evolExpr(degPerSec) {
+        var d = Math.round(degPerSec * 10) / 10;
+        return 'time * (' + d + ') * (thisComp.layer("HOLO_CTRL").effect("Global Speed")(1) / 100);';
+    }
+
+    function wobbleExpr(factor) {
+        var f = Math.round(factor * 100) / 100;
+        return 'thisComp.layer("HOLO_CTRL").effect("Center Wobble")(1) * (' + f + ');';
+    }
+
+    // タービュレントディスプレイス = 輪郭を有機的に波打たせる
+    function addTurbulence(layer, factor, size, offset, evolSpd) {
+        var fx = layer.property("ADBE Effect Parade").addProperty("ADBE Turbulent Displace");
+        fx.property("Amount").expression = wobbleExpr(factor);
+        fx.property("Size").setValue(size);
+        fx.property("Offset (Turbulence)").setValue(offset);
+        fx.property("Evolution").expression = evolExpr(evolSpd);
+        return fx;
+    }
+
+    // 水平リング1枚（センターオブジェクトの構成部品）
+    function createCenterRing(comp, root, name, comment, y, r, strokeW, opac, spinDeg, useAccent) {
+        var lyr = comp.layers.addShape();
+        lyr.name = name;
+        lyr.comment = comment;
+        lyr.threeDLayer = true;
+        lyr.parent = root;
+        var t = lyr.property("ADBE Transform Group");
+        t.property("ADBE Position").setValue([50, 50 + y, 0]);
+        t.property("ADBE Rotate X").setValue(90);
+        t.property("ADBE Opacity").setValue(opac);
+        var inner = lyr.property("ADBE Root Vectors Group")
+            .addProperty("ADBE Vector Group").property("ADBE Vectors Group");
+        var ell = inner.addProperty("ADBE Vector Shape - Ellipse");
+        ell.property("ADBE Vector Ellipse Size").setValue([r * 2, r * 2]);
+        var st = inner.addProperty("ADBE Vector Graphic - Stroke");
+        st.property("ADBE Vector Stroke Width").setValue(strokeW);
+        st.property("ADBE Vector Stroke Color").expression = useAccent ? EXP.strokeAccent : EXP.strokeMain;
+        if (spinDeg) t.property("ADBE Rotate Z").expression = groupSpinExpr(spinDeg);
+        return lyr;
+    }
+
+    // ---------------------------------------------------------
+    // センターオブジェクト: 球体ブロブ（ぐにゃぐにゃ球）
+    // 各リングの輪郭パスを毎フレーム計算する。全リングが同じノイズ関数を
+    // 共有するので、隣のリングと連動した「ひとつの塊のうねり」になる。
+    // 緯度リング + 経線（縦の大円）でワイヤーフレーム球を構成。
+    // ---------------------------------------------------------
+    function blobPathExpr(R, phi, seedPh, drift) {
+        var r0 = Math.round(R * 10) / 10;
+        var p0 = Math.round(phi * 100) / 100;
+        var s0 = Math.round(seedPh * 100) / 100;
+        var d0 = Math.round(drift * 1000) / 1000;
+        return '' +
+            'var N = 48;\n' +
+            'var ctrl = thisComp.layer("HOLO_CTRL");\n' +
+            'var sp = ctrl.effect("Global Speed")(1) / 100;\n' +
+            'var A = ctrl.effect("Center Wobble")(1) / 100;\n' +
+            'var t = time * sp;\n' +
+            'var pts = [], itan = [], otan = [];\n' +
+            'for (var i = 0; i < N; i++) {\n' +
+            '  var th = i / N * Math.PI * 2 + t * (' + d0 + ');\n' +
+            // 5オクターブのノイズ。φ（緯度）の係数を小さくして隣のリングと
+            // なめらかに連動させ、「ひとつの面」に見せる
+            '  var n = 0.25 * Math.sin(3 * th + t * 0.8 + (' + p0 + ') * 1.3 + (' + s0 + '))\n' +
+            '        + 0.30 * Math.sin(5 * th - t * 1.1 + (' + p0 + ') * 2.1 + 1.7 + (' + s0 + ') * 0.5)\n' +
+            '        + 0.22 * Math.sin(7 * th + t * 1.4 + (' + p0 + ') * 2.9 + 3.1)\n' +
+            '        + 0.18 * Math.sin(9 * th - t * 0.7 + (' + p0 + ') * 3.6 + 4.9)\n' +
+            '        + 0.12 * Math.sin(13 * th + t * 1.9 + (' + p0 + ') * 4.2 + 0.9);\n' +
+            '  var r = (' + r0 + ') * (1 + A * n);\n' +
+            '  pts.push([r * Math.cos(th), r * Math.sin(th)]);\n' +
+            '}\n' +
+            'for (var j = 0; j < N; j++) {\n' +
+            '  var pa = pts[(j + N - 1) % N], pb = pts[(j + 1) % N];\n' +
+            '  var tx = (pb[0] - pa[0]) / 6, ty = (pb[1] - pa[1]) / 6;\n' +
+            '  otan.push([tx, ty]);\n' +
+            '  itan.push([-tx, -ty]);\n' +
+            '}\n' +
+            'createPath(pts, itan, otan, true);';
+    }
+
+    function createBlobRing(comp, root, name, y, R, phi, seedPh, drift, strokeW, opac, xRot, yRot) {
+        var lyr = comp.layers.addShape();
+        lyr.name = name;
+        lyr.comment = "HOLO|center|blob";
+        lyr.threeDLayer = true;
+        lyr.parent = root;
+        var t = lyr.property("ADBE Transform Group");
+        t.property("ADBE Position").setValue([50, 50 + y, 0]);
+        t.property("ADBE Rotate X").setValue(xRot);
+        t.property("ADBE Rotate Y").setValue(yRot);
+        t.property("ADBE Opacity").setValue(opac);
+        var inner = lyr.property("ADBE Root Vectors Group")
+            .addProperty("ADBE Vector Group").property("ADBE Vectors Group");
+        var pathGrp = inner.addProperty("ADBE Vector Shape - Group");
+        pathGrp.property("ADBE Vector Shape").expression = blobPathExpr(R, phi, seedPh, drift);
+        var st = inner.addProperty("ADBE Vector Graphic - Stroke");
+        st.property("ADBE Vector Stroke Width").setValue(strokeW);
+        st.property("ADBE Vector Stroke Color").expression = EXP.strokeMain;
+        return lyr;
+    }
+
+    function createBlob(comp, root, params, rng) {
+        var Rb = params.baseRadius * rng.range(0.28, 0.44);
+        var seedPh = rng.range(0, 6.28);
+
+        // 全リングをバラバラな向きの大円にする。向きはフィボナッチ球面配置＋
+        // ジッターで全方位に均等分散 — どの視点にも正面向きのリングが入る
+        var n = rng.rint(16, 22);
+        var goldenAng = 137.5;
+        var yBase = rng.range(0, 360);
+        for (var i = 0; i < n; i++) {
+            var zz = 1 - 2 * (i + 0.5) / n;
+            var xr = Math.asin(Math.max(-1, Math.min(1, zz))) * 180 / Math.PI + rng.range(-8, 8);
+            var yr = (yBase + i * goldenAng + rng.range(-10, 10)) % 360;
+            createBlobRing(comp, root, "HOLO_BLOB_" + pad3(i + 1),
+                0, Rb * rng.range(0.88, 1.0), rng.range(0, 6.28), seedPh,
+                rng.range(-0.1, 0.1),
+                rng.range(1.0, 1.5), rng.range(45, 85),
+                xr, yr);
+        }
+    }
+
+    // ---------------------------------------------------------
+    // センターオブジェクト: 等高線（揺れるトポグラフィ）
+    // ---------------------------------------------------------
+    function createTopoCenter(comp, root, params, rng) {
+        var maxR = params.baseRadius * rng.range(0.7, 0.95);
+        var n = rng.rint(6, 9);
+        var off = [rng.range(0, 1000), rng.range(0, 1000)];
+        var size = rng.range(130, 220);
+        var evol = rng.range(15, 40);
+        for (var i = 0; i < n; i++) {
+            var r = maxR * (i + 1) / n;
+            var opac = 85 - 50 * (n > 1 ? i / (n - 1) : 0);
+            var lyr = createCenterRing(comp, root,
+                "HOLO_TOPO_" + pad3(i + 1), "HOLO|center|topo",
+                0, r, rng.range(1.1, 1.7), opac, 0, false);
+            addTurbulence(lyr, 1.2, size, off, evol);
+        }
+    }
+
+    // ---------------------------------------------------------
+    // センターオブジェクト: レーダー / ソナー
+    // ---------------------------------------------------------
+    function blipExpr(angleDeg, sweepSpd) {
+        var a = Math.round(angleDeg * 10) / 10;
+        var s = Math.round(sweepSpd * 10) / 10;
+        return 'var sp = thisComp.layer("HOLO_CTRL").effect("Global Speed")(1) / 100;\n' +
+            'var ph = (time * (' + s + ') * sp) % 360;\n' +
+            'if (ph < 0) ph += 360;\n' +
+            'var d = ((ph - (' + a + ')) % 360 + 360) % 360;\n' +
+            'd < 8 ? 100 : linear(d, 8, 200, 90, 8);';
+    }
+
+    function createRadarCenter(comp, root, params, rng) {
+        var R = params.baseRadius * rng.range(0.5, 0.8);
+        var sweepSpd = rng.range(40, 90) * (rng.chance(0.5) ? 1 : -1);
+
+        // ベース: 距離リング + 十字線
+        var base = comp.layers.addShape();
+        base.name = "HOLO_RADAR_BASE";
+        base.comment = "HOLO|center|radar";
+        base.threeDLayer = true;
+        base.parent = root;
+        var bt = base.property("ADBE Transform Group");
+        bt.property("ADBE Position").setValue([50, 50, 0]);
+        bt.property("ADBE Rotate X").setValue(90);
+        bt.property("ADBE Opacity").setValue(50);
+        var bInner = base.property("ADBE Root Vectors Group")
+            .addProperty("ADBE Vector Group").property("ADBE Vectors Group");
+        var ringN = rng.rint(3, 4);
+        for (var k = 1; k <= ringN; k++) {
+            var e = bInner.addProperty("ADBE Vector Shape - Ellipse");
+            e.property("ADBE Vector Ellipse Size").setValue([R * 2 * k / ringN, R * 2 * k / ringN]);
+        }
+        addLinePath(bInner, [[-R, 0], [R, 0]]);
+        addLinePath(bInner, [[0, -R], [0, R]]);
+        var bSt = bInner.addProperty("ADBE Vector Graphic - Stroke");
+        bSt.property("ADBE Vector Stroke Width").setValue(1.2);
+        bSt.property("ADBE Vector Stroke Color").expression = EXP.strokeMain;
+
+        // スイープ（本線 + 残像の3本）
+        var sw = comp.layers.addShape();
+        sw.name = "HOLO_RADAR_SWEEP";
+        sw.comment = "HOLO|center|radar";
+        sw.threeDLayer = true;
+        sw.parent = root;
+        var st = sw.property("ADBE Transform Group");
+        st.property("ADBE Position").setValue([50, 50, 0]);
+        st.property("ADBE Rotate X").setValue(90);
+        var swRoot = sw.property("ADBE Root Vectors Group");
+        var trailRot = (sweepSpd >= 0) ? -1 : 1; // 残像は進行方向の後ろへ
+        var trailOp = [100, 45, 18];
+        for (var tr = 0; tr < 3; tr++) {
+            var g = swRoot.addProperty("ADBE Vector Group");
+            g.name = "sweep" + (tr + 1);
+            var gi = g.property("ADBE Vectors Group");
+            addLinePath(gi, [[0, 0], [R, 0]]);
+            var gs = gi.addProperty("ADBE Vector Graphic - Stroke");
+            gs.property("ADBE Vector Stroke Width").setValue(tr === 0 ? 2.5 : 2);
+            gs.property("ADBE Vector Stroke Color").expression = EXP.strokeAccent;
+            var gt = g.property("ADBE Vector Transform Group");
+            gt.property("ADBE Vector Rotation").setValue(trailRot * tr * 7);
+            gt.property("ADBE Vector Group Opacity").setValue(trailOp[tr]);
+        }
+        st.property("ADBE Rotate Z").expression = groupSpinExpr(sweepSpd);
+
+        // ブリップ（スイープが通過すると光り、徐々に減衰）
+        var bl = comp.layers.addShape();
+        bl.name = "HOLO_RADAR_BLIPS";
+        bl.comment = "HOLO|center|radar";
+        bl.threeDLayer = true;
+        bl.parent = root;
+        var lt = bl.property("ADBE Transform Group");
+        lt.property("ADBE Position").setValue([50, 50, 0]);
+        lt.property("ADBE Rotate X").setValue(90);
+        var blRoot = bl.property("ADBE Root Vectors Group");
+        var blipN = rng.rint(4, 8);
+        for (var b = 0; b < blipN; b++) {
+            var aDeg = rng.range(0, 360);
+            var br = R * rng.range(0.2, 0.92);
+            var bg = blRoot.addProperty("ADBE Vector Group");
+            bg.name = "blip" + (b + 1);
+            var bgi = bg.property("ADBE Vectors Group");
+            var be = bgi.addProperty("ADBE Vector Shape - Ellipse");
+            var bs = rng.range(5, 9);
+            be.property("ADBE Vector Ellipse Size").setValue([bs, bs]);
+            be.property("ADBE Vector Ellipse Position").setValue(
+                [br * Math.cos(aDeg * Math.PI / 180), br * Math.sin(aDeg * Math.PI / 180)]);
+            var bf = bgi.addProperty("ADBE Vector Graphic - Fill");
+            bf.property("ADBE Vector Fill Color").expression = EXP.strokeAccent;
+            bg.property("ADBE Vector Transform Group")
+                .property("ADBE Vector Group Opacity").expression = blipExpr(aDeg, sweepSpd);
+        }
+    }
+
+    // ---------------------------------------------------------
+    // モチーフ: スピードメーター（円弧ゲージ + 針）
+    // ---------------------------------------------------------
+    function needleExpr(endDeg, seedN) {
+        var e = Math.round(endDeg * 10) / 10;
+        return 'var sp = thisComp.layer("HOLO_CTRL").effect("Global Speed")(1) / 100;\n' +
+            'var t = time * sp;\n' +
+            'var base = 0.5 + 0.5 * Math.sin(t * 0.55 + ' + seedN + ');\n' +
+            'var n = 0.05 * Math.sin(t * 6.7 + ' + (seedN * 3.1).toFixed(2) + ') + 0.03 * Math.sin(t * 11.3 + ' + seedN + ');\n' +
+            'value + clamp(base + n, 0, 1) * (' + e + ');';
+    }
+
+    function createGauges(comp, root, params, rng) {
+        var infos = [];
+        var gCount = rng.chance(0.6) ? 2 : (rng.chance(0.5) ? 1 : 3);
+        var Rg = params.baseRadius * (gCount === 1 ? 0.8 : (gCount === 2 ? 0.55 : 0.42)) * rng.range(0.9, 1.1);
+        var gapX = params.baseRadius * (gCount === 3 ? 0.85 : 0.75);
+
+        for (var g = 0; g < gCount; g++) {
+            var cx = (g - (gCount - 1) / 2) * gapX * 2;
+            var sweepPct = rng.range(60, 75); // 目盛り範囲（%）= 216〜270°
+            var circ = 2 * Math.PI * Rg;
+
+            var lyr = comp.layers.addShape();
+            lyr.name = "HOLO_GAUGE_" + (g + 1);
+            lyr.comment = "HOLO|gauge|seed=" + params.seed;
+            lyr.threeDLayer = true;
+            lyr.parent = root;
+            var t = lyr.property("ADBE Transform Group");
+            t.property("ADBE Position").setValue([50 + cx, 50, 0]);
+            t.property("ADBE Rotate X").setValue(90);
+            t.property("ADBE Rotate Z").setValue(rng.range(0, 360)); // 円盤上の向き
+            addSlider(lyr, "Ring Opacity", Math.round(rng.range(80, 100)));
+            t.property("ADBE Opacity").expression = EXP.ringOpacity;
+
+            var contents = lyr.property("ADBE Root Vectors Group");
+
+            function gaugeArc(radius, trimStart, trimEnd, width, dash, gap, accent) {
+                var grp = contents.addProperty("ADBE Vector Group");
+                var gi = grp.property("ADBE Vectors Group");
+                var e = gi.addProperty("ADBE Vector Shape - Ellipse");
+                e.property("ADBE Vector Ellipse Size").setValue([radius * 2, radius * 2]);
+                var trm = gi.addProperty("ADBE Vector Filter - Trim");
+                trm.property("ADBE Vector Trim Start").setValue(trimStart);
+                trm.property("ADBE Vector Trim End").setValue(trimEnd);
+                var s = gi.addProperty("ADBE Vector Graphic - Stroke");
+                s.property("ADBE Vector Stroke Width").setValue(width);
+                s.property("ADBE Vector Stroke Color").expression = accent ? EXP.strokeAccent : EXP.strokeMain;
+                if (dash > 0) {
+                    var d = s.property("ADBE Vector Stroke Dashes");
+                    d.addProperty("ADBE Vector Stroke Dash 1").setValue(dash);
+                    d.addProperty("ADBE Vector Stroke Gap 1").setValue(gap);
+                }
+                return grp;
+            }
+
+            // 外周アーク
+            gaugeArc(Rg, 0, sweepPct, 2, 0, 0, false);
+            // 大目盛り
+            var majN = rng.rint(8, 12);
+            var arcPx = circ * sweepPct / 100;
+            gaugeArc(Rg * 0.99, 0, sweepPct, Rg * 0.1, 2.5, arcPx / majN - 2.5, false);
+            // 小目盛り
+            var minN = majN * 5;
+            gaugeArc(Rg * 0.93, 0, sweepPct, Rg * 0.05, 1.2, circ * 0.93 * sweepPct / 100 / minN - 1.2, false);
+            // レッドゾーン（終端側）
+            gaugeArc(Rg * 1.05, sweepPct * 0.84, sweepPct, 5, 0, 0, true);
+            // ハブ
+            var hub = contents.addProperty("ADBE Vector Group");
+            var hubI = hub.property("ADBE Vectors Group");
+            var he = hubI.addProperty("ADBE Vector Shape - Ellipse");
+            he.property("ADBE Vector Ellipse Size").setValue([14, 14]);
+            var hf = hubI.addProperty("ADBE Vector Graphic - Fill");
+            hf.property("ADBE Vector Fill Color").expression = EXP.strokeMain;
+
+            // 針（ゲージにペアレントした別レイヤー。回転エクスプレッションでレブ）
+            var nd = comp.layers.addShape();
+            nd.name = "HOLO_NEEDLE_" + (g + 1);
+            nd.comment = "HOLO|gauge";
+            nd.threeDLayer = true;
+            nd.parent = lyr;
+            var nt = nd.property("ADBE Transform Group");
+            nt.property("ADBE Position").setValue([0, 0, 0]);
+            resetTransform3D(nt);
+            var ni = nd.property("ADBE Root Vectors Group")
+                .addProperty("ADBE Vector Group").property("ADBE Vectors Group");
+            addLinePath(ni, [[0, 16], [0, -Rg * 0.82]]);
+            var ns = ni.addProperty("ADBE Vector Graphic - Stroke");
+            ns.property("ADBE Vector Stroke Width").setValue(3);
+            ns.property("ADBE Vector Stroke Color").expression = EXP.strokeAccent;
+            nt.property("ADBE Rotate Z").expression = needleExpr(sweepPct * 3.6, g + 1);
+
+            infos.push({ layer: lyr, yOff: 0, radius: Rg });
+        }
+        return infos;
+    }
 
     // リングの中身（メイン要素 + 装飾）を組み立てる
     function buildRingGroups(lyr, type, rng) {
@@ -575,6 +914,7 @@ var HOLO = HOLO || {};
             addSlider(ctrl, "Callout Opacity", 75);
             addSlider(ctrl, "Grid Opacity", 14);
             addSlider(ctrl, "Dust Opacity", 55);
+            addSlider(ctrl, "Center Wobble", 16); // センターオブジェクトのうねり強さ
 
             // ---- ルート（ホログラム全体の親）----
             var root = comp.layers.addNull();
@@ -609,11 +949,24 @@ var HOLO = HOLO || {};
             camT.property("ADBE Rotate Y").setValue(0);
             camT.property("ADBE Rotate Z").setValue(0);
 
-            // ---- リング群 ----
+            // ---- メイン構造（モチーフで分岐）----
             var ringInfos = [];
-            for (var i = 0; i < params.ringCount; i++) {
-                var type = HOLO.RING_TYPES[rng.rint(0, 3)];
-                ringInfos.push(createRingLayer(comp, root, i, type, params, rng));
+            var motif = params.motif || "ホロ計器";
+            if (motif === "スピードメーター") {
+                ringInfos = createGauges(comp, root, params, rng);
+            } else {
+                for (var i = 0; i < params.ringCount; i++) {
+                    var type = HOLO.RING_TYPES[rng.rint(0, 3)];
+                    ringInfos.push(createRingLayer(comp, root, i, type, params, rng));
+                }
+                // センターオブジェクト
+                var center = params.center || "ランダム";
+                if (center === "ランダム") {
+                    center = ["なし", "球体ブロブ", "等高線", "レーダー"][rng.rint(0, 3)];
+                }
+                if (center === "球体ブロブ") createBlob(comp, root, params, rng);
+                else if (center === "等高線") createTopoCenter(comp, root, params, rng);
+                else if (center === "レーダー") createRadarCenter(comp, root, params, rng);
             }
 
             // ---- 品質プリセット ----
@@ -803,6 +1156,17 @@ var HOLO = HOLO || {};
         var qDrop = qGroup.add("dropdownlist", undefined, ["軽量", "標準", "高密度"]);
         qDrop.selection = 1;
 
+        // ---- モチーフ / センターオブジェクト ----
+        var mGroup = content.add("group");
+        mGroup.add("statictext", undefined, "モチーフ:");
+        var motifDrop = mGroup.add("dropdownlist", undefined, ["ホロ計器", "スピードメーター"]);
+        motifDrop.selection = 0;
+        var cGroup = content.add("group");
+        cGroup.add("statictext", undefined, "センター:");
+        var centerDrop = cGroup.add("dropdownlist", undefined,
+            ["ランダム", "なし", "球体ブロブ", "等高線", "レーダー"]);
+        centerDrop.selection = 0;
+
         // ---- カラー ----
         var colPanel = content.add("panel", undefined, "カラー（クリックで変更）");
         colPanel.orientation = "row";
@@ -953,7 +1317,9 @@ var HOLO = HOLO || {};
                 withCallouts: cbCallouts.value,
                 withGrid: cbGrid.value,
                 withDust: cbDust.value,
-                quality: qDrop.selection ? qDrop.selection.text : "標準"
+                quality: qDrop.selection ? qDrop.selection.text : "標準",
+                motif: motifDrop.selection ? motifDrop.selection.text : "ホロ計器",
+                center: centerDrop.selection ? centerDrop.selection.text : "ランダム"
             };
         }
 
@@ -972,7 +1338,9 @@ var HOLO = HOLO || {};
                 withCallouts: cbCallouts.value,
                 withGrid: cbGrid.value,
                 withDust: cbDust.value,
-                quality: qDrop.selection ? qDrop.selection.text : "標準"
+                quality: qDrop.selection ? qDrop.selection.text : "標準",
+                motif: motifDrop.selection ? motifDrop.selection.text : "ホロ計器",
+                center: centerDrop.selection ? centerDrop.selection.text : "ランダム"
             };
             var p = HOLO.randomParams(seed, keep); // 色・要素ON/OFFは維持、構造だけランダム
             uiRings.set(p.ringCount);
